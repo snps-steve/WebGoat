@@ -1,0 +1,132 @@
+trigger:
+- main
+
+resources:
+- repo: self
+
+variables:
+  tag: '$(Build.BuildId)'
+  # Project naming (tweak if you like)
+  PROJECT_NAME: 'WebGoat-Azure'
+  PROJECT_VERSION: '$(Build.SourceBranchName)-$(Build.BuildId)'
+
+stages:
+# ----------------------------
+# 1) Build the Docker image
+# ----------------------------
+- stage: Build
+  displayName: Build image
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: Docker@2
+      displayName: Build image
+      inputs:
+        command: build
+        dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+        repository: 'webgoat/webgoat'
+        tags: |
+          $(tag)
+
+# -------------------------------------------------------
+# 2) Security scans via Synopsys Bridge (official task)
+#    Job A: Black Duck SCA
+#    Job B: Coverity (thin client via Bridge)
+# -------------------------------------------------------
+- stage: Security
+  displayName: Security Scans
+  dependsOn: Build
+  jobs:
+
+  # --- Black Duck SCA ---
+  - job: BlackDuckSCA
+    displayName: Black Duck SCA (Bridge)
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    # Optional: Java/Maven for WebGoat build/resolve
+    - task: JavaToolInstaller@0
+      displayName: 'Use Temurin JDK 17'
+      inputs:
+        versionSpec: '17'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
+
+    # (Optional) Build to ensure lockfiles/targets are resolved before SCA
+    - script: |
+        mvn -v
+        mvn -B -DskipTests package
+      displayName: 'Build WebGoat with Maven'
+
+    # Black Duck Security Scan (uses Bridge under the hood)
+    - task: blackduck.blackduck-security-scan.BlackDuckSecurityScan@1
+      displayName: 'Black Duck SCA scan (Bridge CLI)'
+      inputs:
+        productToRun: 'blackduck'        # other options include coverity, polaris, srm
+        blackduckUrl: '$(BD_URL)'
+        blackduckApiToken: '$(BD_TOKEN)'
+        # Project/Version naming
+        blackduckProjectName: '$(PROJECT_NAME)'
+        blackduckProjectVersion: '$(PROJECT_VERSION)'
+        # Policy gate (fail pipeline on policy)
+        blackduckScanFailureConditions: 'policy' # 'none'|'vulnerabilities'|'policy'
+        # Advanced Bridge flags (optional):
+        # additionalArguments: '--blackduck.trust.cert=true --detect.cleanup=false'
+        # To scan the built Docker image instead of (or in addition to) source, add:
+        # additionalArguments: '--detect.tools=SIGNATURE_SCAN --detect.docker.image=webgoat/webgoat:$(tag)'
+
+  # --- Coverity (Thin Client via Bridge) ---
+  - job: Coverity
+    displayName: Coverity (Bridge Thin Client)
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: JavaToolInstaller@0
+      displayName: 'Use Temurin JDK 17'
+      inputs:
+        versionSpec: '17'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
+
+    # Create a minimal coverity.yaml for Bridge thin client.
+    # Adjust build commands if your build changes.
+    - script: |
+        cat > coverity.yaml <<'YAML'
+        # Bridge will read this by default from the working directory
+        coverity:
+          connect:
+            url: ${COV_URL}
+            user: ${COV_USER}
+            passphrase: ${COV_PASSPHRASE}
+            stream: ${COV_STREAM}
+          # Optional: set project if you prefer project/stream pairing
+          # project:
+          #   name: WebGoat-Azure
+          build:
+            cleanCommand: mvn -B -DskipTests clean
+            buildCommand: mvn -B -DskipTests package
+            # parallelJobs: 8   # uncomment to speed up capture
+          # analysis:
+          #   coverityVersion: latest
+          # commit:
+          #   advancedOptions: ""
+        YAML
+      displayName: 'Generate coverity.yaml'
+
+    # Coverity scan via Bridge
+    - task: blackduck.blackduck-security-scan.BlackDuckSecurityScan@1
+      displayName: 'Coverity scan (Bridge CLI)'
+      inputs:
+        productToRun: 'coverity'
+        coverityUrl: '$(COV_URL)'
+        coverityUser: '$(COV_USER)'
+        coverityPassphrase: '$(COV_PASSPHRASE)'
+        coverityStream: '$(COV_STREAM)'
+        # Use the generated coverity.yaml in repo root
+        coverityConfigPath: 'coverity.yaml'
+        # Fail the job if issues exceed default thresholds (optional):
+        # coverityScanFailureConditions: 'issues'  # or 'none'
+
