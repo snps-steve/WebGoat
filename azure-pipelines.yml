@@ -1,8 +1,9 @@
 trigger:
 - main
 
+# Use your self-hosted agent everywhere by default
 pool:
-  vmImage: ubuntu-latest   # works once the project is Public
+  name: "Self-Hosted ADO Agent"
 
 variables:
   tag: '$(Build.BuildId)'
@@ -14,8 +15,13 @@ stages:
   displayName: Build image
   jobs:
   - job: Build
-    pool: { vmImage: ubuntu-latest }
+    displayName: Build
     steps:
+    - script: |
+        echo "Agent name: $AGENT_NAME"
+        docker version
+      displayName: Verify Docker is working
+
     - task: Docker@2
       displayName: Build image
       inputs:
@@ -32,14 +38,21 @@ stages:
 
   - job: BlackDuckSCA
     displayName: Black Duck SCA (Bridge)
-    pool: { vmImage: ubuntu-latest }
     steps:
+    - script: |
+        java -version
+        mvn -v
+        docker version
+      displayName: Env sanity
+
     - task: JavaToolInstaller@0
       displayName: 'Use Temurin JDK 17'
-      inputs: { versionSpec: '17', jdkArchitectureOption: 'x64', jdkSourceOption: 'PreInstalled' }
+      inputs:
+        versionSpec: '17'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
 
     - script: |
-        mvn -v
         mvn -B -DskipTests package
       displayName: 'Build with Maven'
 
@@ -72,14 +85,24 @@ stages:
         blackduck_url: '$(BD_URL)'
         blackduck_token: '$(BD_TOKEN)'
         additional_args: '--config bridge.yml --diagnostic'
+        # To scan the built Docker image too, add:
+        # additional_args: '--config bridge.yml --diagnostic --detect.tools=SIGNATURE_SCAN --detect.docker.image=webgoat/webgoat:$(tag)'
 
   - job: Coverity
     displayName: Coverity (Bridge Thin Client)
-    pool: { vmImage: ubuntu-latest }
     steps:
+    - script: |
+        java -version
+        mvn -v
+        docker version
+      displayName: Env sanity
+
     - task: JavaToolInstaller@0
       displayName: 'Use Temurin JDK 17'
-      inputs: { versionSpec: '17', jdkArchitectureOption: 'x64', jdkSourceOption: 'PreInstalled' }
+      inputs:
+        versionSpec: '17'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
 
     - task: BlackDuckSecurityScan@2.2.0
       displayName: 'Coverity scan (Bridge)'
