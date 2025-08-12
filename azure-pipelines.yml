@@ -67,14 +67,18 @@ stages:
       displayName: Generate bridge.yml
 
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: Black Duck scan (Bridge)
+      displayName: 'Black Duck scan (Bridge)'
       inputs:
         bridge_installation_type: 'download'
         include_blackduck: true
         include_coverity: false
         blackduck_url: '$(BD_URL)'
         blackduck_token: '$(BD_TOKEN)'
-        additional_args: '--config bridge.yml --diagnostic'
+        additional_args: >-
+          --config bridge.yml
+          --diagnostic
+          --network.ssl.trustAll=true          # <-- trust all SSL certs (quickest)
+          # or: --blackduck.trust.cert=true    # Detect-style flag that also works
 
   - job: Coverity
     steps:
