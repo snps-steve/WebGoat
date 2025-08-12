@@ -1,7 +1,6 @@
 trigger:
 - main
 
-# Use your self-hosted agent everywhere by default
 pool:
   name: "Self-Hosted ADO Agent"
 
@@ -18,10 +17,27 @@ stages:
     displayName: Build
     steps:
     - script: |
-        echo "Agent name: $AGENT_NAME"
+        whoami
+        id
         docker version
-      displayName: Verify Docker is working
+      displayName: Env + Docker sanity
 
+    # Ensure JDK 23 for mvnw (you already have JDK 17; this installs 23 for the job)
+    - task: JavaToolInstaller@0
+      displayName: 'Use Temurin JDK 23'
+      inputs:
+        versionSpec: '23'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
+
+    # Build from source with the Maven wrapper (OWASP instructions)
+    - script: |
+        chmod +x ./mvnw
+        ./mvnw -v
+        ./mvnw -B clean install
+      displayName: 'Build WebGoat with mvnw (clean install)'
+
+    # Now the Dockerfile can COPY target/webgoat-*.jar
     - task: Docker@2
       displayName: Build image
       inputs:
@@ -41,21 +57,19 @@ stages:
     steps:
     - script: |
         java -version
-        mvn -v
+        ./mvnw -v
         docker version
       displayName: Env sanity
 
     - task: JavaToolInstaller@0
-      displayName: 'Use Temurin JDK 17'
+      displayName: 'Use Temurin JDK 23'
       inputs:
-        versionSpec: '17'
+        versionSpec: '23'
         jdkArchitectureOption: 'x64'
         jdkSourceOption: 'PreInstalled'
 
-    - script: |
-        mvn -B -DskipTests package
-      displayName: 'Build with Maven'
-
+    # You can skip another full build here if Stage Build already produced artifacts;
+    # Black Duck SCA doesn't require it unless you want it
     - script: |
         cat > bridge.yml <<'YAML'
         blackduck:
@@ -71,8 +85,8 @@ stages:
             passphrase: ${COV_PASSPHRASE}
             stream: ${COV_STREAM}
           build:
-            cleanCommand: mvn -B -DskipTests clean
-            buildCommand: mvn -B -DskipTests package
+            cleanCommand: ./mvnw -B -DskipTests clean
+            buildCommand: ./mvnw -B -DskipTests package
         YAML
       displayName: 'Generate bridge.yml'
 
@@ -85,22 +99,22 @@ stages:
         blackduck_url: '$(BD_URL)'
         blackduck_token: '$(BD_TOKEN)'
         additional_args: '--config bridge.yml --diagnostic'
-        # To scan the built Docker image too, add:
-        # additional_args: '--config bridge.yml --diagnostic --detect.tools=SIGNATURE_SCAN --detect.docker.image=webgoat/webgoat:$(tag)'
+        # To also scan the built image (optional), append:
+        # --detect.tools=SIGNATURE_SCAN --detect.docker.image=webgoat/webgoat:$(tag)
 
   - job: Coverity
     displayName: Coverity (Bridge Thin Client)
     steps:
     - script: |
         java -version
-        mvn -v
+        ./mvnw -v
         docker version
       displayName: Env sanity
 
     - task: JavaToolInstaller@0
-      displayName: 'Use Temurin JDK 17'
+      displayName: 'Use Temurin JDK 23'
       inputs:
-        versionSpec: '17'
+        versionSpec: '23'
         jdkArchitectureOption: 'x64'
         jdkSourceOption: 'PreInstalled'
 
@@ -114,3 +128,4 @@ stages:
         coverity_user: '$(COV_USER)'
         coverity_passphrase: '$(COV_PASSPHRASE)'
         additional_args: '--config bridge.yml --diagnostic'
+
