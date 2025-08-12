@@ -1,8 +1,8 @@
 trigger:
 - main
 
-resources:
-- repo: self
+pool:
+  vmImage: ubuntu-latest   # works once the project is Public
 
 variables:
   tag: '$(Build.BuildId)'
@@ -10,16 +10,11 @@ variables:
   PROJECT_VERSION: '$(Build.SourceBranchName)-$(Build.BuildId)'
 
 stages:
-# ----------------------------
-# 1) Build the Docker image
-# ----------------------------
 - stage: Build
   displayName: Build image
   jobs:
   - job: Build
-    displayName: Build
-    pool:
-      vmImage: ubuntu-latest
+    pool: { vmImage: ubuntu-latest }
     steps:
     - task: Docker@2
       displayName: Build image
@@ -30,35 +25,24 @@ stages:
         tags: |
           $(tag)
 
-# -------------------------------------------------------
-# 2) Security scans via Synopsys Security Scan (Bridge)
-#    Job A: Black Duck SCA
-#    Job B: Coverity (thin client via Bridge)
-# -------------------------------------------------------
 - stage: Security
   displayName: Security Scans
   dependsOn: Build
   jobs:
 
-  # --- Black Duck SCA ---
   - job: BlackDuckSCA
     displayName: Black Duck SCA (Bridge)
-    pool:
-      vmImage: ubuntu-latest
+    pool: { vmImage: ubuntu-latest }
     steps:
     - task: JavaToolInstaller@0
       displayName: 'Use Temurin JDK 17'
-      inputs:
-        versionSpec: '17'
-        jdkArchitectureOption: 'x64'
-        jdkSourceOption: 'PreInstalled'
+      inputs: { versionSpec: '17', jdkArchitectureOption: 'x64', jdkSourceOption: 'PreInstalled' }
 
     - script: |
         mvn -v
         mvn -B -DskipTests package
-      displayName: 'Build WebGoat with Maven'
+      displayName: 'Build with Maven'
 
-    # Bridge config for BD + (later) Coverity
     - script: |
         cat > bridge.yml <<'YAML'
         blackduck:
@@ -67,9 +51,6 @@ stages:
           project:
             name: ${PROJECT_NAME}
             version: ${PROJECT_VERSION}
-          # Optional: fail on policy
-          # policy:
-          #   failOn: policy
         coverity:
           connect:
             url: ${COV_URL}
@@ -82,32 +63,26 @@ stages:
         YAML
       displayName: 'Generate bridge.yml'
 
-    # Use the Marketplace task (new ID)
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: 'Black Duck Security Scan - BD SCA'
+      displayName: 'Black Duck scan (Bridge)'
       inputs:
-        bridge_installation_type: 'download'   # or 'preinstalled'
+        bridge_installation_type: 'download'
         include_blackduck: true
         include_coverity: false
         blackduck_url: '$(BD_URL)'
         blackduck_token: '$(BD_TOKEN)'
         additional_args: '--config bridge.yml --diagnostic'
 
-  # --- Coverity (Thin Client via Bridge) ---
   - job: Coverity
     displayName: Coverity (Bridge Thin Client)
-    pool:
-      vmImage: ubuntu-latest
+    pool: { vmImage: ubuntu-latest }
     steps:
     - task: JavaToolInstaller@0
       displayName: 'Use Temurin JDK 17'
-      inputs:
-        versionSpec: '17'
-        jdkArchitectureOption: 'x64'
-        jdkSourceOption: 'PreInstalled'
+      inputs: { versionSpec: '17', jdkArchitectureOption: 'x64', jdkSourceOption: 'PreInstalled' }
 
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: 'Black Duck Security Scan – Coverity'
+      displayName: 'Coverity scan (Bridge)'
       inputs:
         bridge_installation_type: 'download'
         include_blackduck: false
