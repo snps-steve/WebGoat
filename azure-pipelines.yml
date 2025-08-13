@@ -1,36 +1,26 @@
 trigger:
 - main
 
-# Run everything on your self-hosted agent
 pool:
   name: "Self-Hosted ADO Agent"
 
 # -----------------------------
-# Variables & (optional) secrets
+# Variables (override at queue time if you like)
 # -----------------------------
 variables:
-# If you store secrets in a Library variable group, include it here:
-# - group: synopsys-secrets
-
 - name: tag
   value: '$(Build.BuildId)'
-
 - name: PROJECT_NAME
   value: 'WebGoat-Azure'
-
 - name: PROJECT_VERSION
   value: '$(Build.SourceBranchName)-$(Build.BuildId)'
-
-# Default Coverity names (you can override in the UI at queue time)
 - name: COVERITY_PROJECT_NAME
   value: '$(Build.Repository.Name)'
-
 - name: COVERITY_STREAM_NAME
   value: '$(Build.SourceBranchName)'
-
-# Expected secrets (either via the group above or set in the pipeline UI):
+# Secrets expected in pipeline/variable group:
 #   BD_URL, BD_TOKEN
-#   COV_URL, COV_USER, COV_PASSPHRASE
+#   COV_URL (e.g., https://coverity.mycorp.local:8443), COV_USER, COV_PASSPHRASE
 
 stages:
 
@@ -51,14 +41,12 @@ stages:
         java -version
       displayName: Env + Docker + JDK sanity
 
-    # Build the JAR with the Maven wrapper (per OWASP instructions)
     - script: |
         chmod +x ./mvnw
         ./mvnw -v
         ./mvnw -B clean install
       displayName: Build WebGoat with mvnw (produces target/webgoat-*.jar)
 
-    # Now the Dockerfile's COPY of target/webgoat-*.jar will succeed
     - task: Docker@2
       displayName: Build Docker image
       inputs:
@@ -86,19 +74,18 @@ stages:
       displayName: JDK sanity
 
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: 'Black Duck scan (Bridge)'
+      displayName: Black Duck scan (Bridge)
       env:
         DETECT_PROJECT_NAME: $(PROJECT_NAME)
         DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
         DETECT_SELF_UPDATE_DISABLED: "true"
-        # If your org uses a proxy, uncomment & adjust NO_PROXY:
         # HTTPS_PROXY: $(HTTPS_PROXY)
         # HTTP_PROXY:  $(HTTP_PROXY)
-        # NO_PROXY: "localhost,127.0.0.1,44.241.196.24,$(COV_URL),$(BD_URL)"
+        # NO_PROXY: "localhost,127.0.0.1,$(COV_URL),$(BD_URL)"
       inputs:
         BLACKDUCKSCA_URL: $(BD_URL)
         BLACKDUCKSCA_TOKEN: $(BD_TOKEN)
-        NETWORK_SSL_TRUSTALL: true   # temporary; prefer installing your CA
+        NETWORK_SSL_TRUSTALL: true   # temp; prefer installing CA
 
   # ---- Coverity (Bridge connect / thin-client bootstrap) ----
   - job: Coverity
@@ -109,47 +96,44 @@ stages:
         ./mvnw -v
       displayName: JDK sanity
 
-    # Sanitize project/stream names (no slashes/spaces/etc.)
+    # Sanitize and OVERWRITE base vars so the task’s pre-check sees them
     - bash: |
         set -euo pipefail
-        PROJ="$(echo '$(COVERITY_PROJECT_NAME)')"
-        STRM="$(echo '$(COVERITY_STREAM_NAME)')"
+        PROJ_RAW='$(COVERITY_PROJECT_NAME)'
+        STRM_RAW='$(COVERITY_STREAM_NAME)'
         sanitize () { echo "$1" | tr '/ ' '--' | sed -E 's/[^A-Za-z0-9._-]/-/g' | cut -c1-200; }
-        PROJ_CLEAN="$(sanitize "$PROJ")"
-        STRM_CLEAN="$(sanitize "$STRM")"
-        echo "Coverity Project: $PROJ_CLEAN"
-        echo "Coverity Stream : $STRM_CLEAN"
-        echo "##vso[task.setvariable variable=COVERITY_PROJECT_NAME_CLEAN]$PROJ_CLEAN"
-        echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME_CLEAN]$STRM_CLEAN"
-      displayName: "Sanitize Coverity project/stream names"
+        PROJ_CLEAN="$(sanitize "$PROJ_RAW")"
+        STRM_CLEAN="$(sanitize "$STRM_RAW")"
+        echo "Coverity Project (raw -> clean): $PROJ_RAW -> $PROJ_CLEAN"
+        echo "Coverity Stream  (raw -> clean): $STRM_RAW -> $STRM_CLEAN"
+        echo "##vso[task.setvariable variable=COVERITY_PROJECT_NAME]$PROJ_CLEAN"
+        echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME]$STRM_CLEAN"
+      displayName: Sanitize Coverity project/stream names
 
-    # (Optional) quick connectivity check from the agent
+    # Optional: quick HTTPS reachability check
     - bash: |
         set -x
-        echo "Agent egress IP (public):" 
-        curl -s https://ifconfig.me || curl -s https://api.ipify.org
-        echo
-        echo "curl to toolslist (10s timeout):"
-        curl -vk --connect-timeout 10 http://44.241.196.24:8080/api/v2/scans/toolslist || true
-        command -v nc && nc -vz -w 5 44.241.196.24 8080 || true
-        displayName: "Connectivity check to Coverity"
+        echo "Agent egress IP:"; curl -s https://ifconfig.me || curl -s https://api.ipify.org; echo
+        curl -vk --connect-timeout 10 $(COV_URL)/api/v2/scans/toolslist || true
+        env | grep -E '^COVERITY_(PROJECT_NAME|STREAM_NAME)=' || true
+        command -v nc && nc -vz -w 5 \
+          $(echo $(COV_URL) | sed -E 's@^https?://([^:/]+).*$@\1@') \
+          $(echo $(COV_URL) | sed -nE 's@^https?://[^:/]+:([0-9]+).*@\1@p' | awk '{print ($0=="")?8443:$0}')
+      displayName: Connectivity check to Coverity (HTTPS)
+    # keep or drop next line; leaving errors here won’t block the real task
       continueOnError: true
 
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: 'Coverity scan (Bridge)'
+      displayName: Coverity scan (Bridge)
       env:
-        COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME_CLEAN)
-        COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME_CLEAN)
-        # If you need a proxy, mirror the SCA env above and tune NO_PROXY:
+        COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)   # now sanitized
+        COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)    # now sanitized
         # HTTPS_PROXY: $(HTTPS_PROXY)
         # HTTP_PROXY:  $(HTTP_PROXY)
-        # NO_PROXY: "localhost,127.0.0.1,44.241.196.24,$(COV_URL),$(BD_URL)"
+        # NO_PROXY: "localhost,127.0.0.1,coverity.mycorp.local"
       inputs:
-        COVERITY_URL: $(COV_URL)
+        COVERITY_URL: $(COV_URL)             # e.g., https://coverity.mycorp.local:8443
         COVERITY_USER: $(COV_USER)
         COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
-        NETWORK_SSL_TRUSTALL: true   # only needed if using HTTPS with self-signed
+        NETWORK_SSL_TRUSTALL: true           # ok for testing; install CA later
 
-        # If/when you add a full Coverity build/capture, configure it here
-        # (or provide a coverity.yaml). For simple connect/post-scan,
-        # the fields above are sufficient.
