@@ -11,20 +11,26 @@ pool:
 variables:
 # If you store secrets in a Library variable group, include it here:
 # - group: synopsys-secrets
+
 - name: tag
   value: '$(Build.BuildId)'
+
 - name: PROJECT_NAME
   value: 'WebGoat-Azure'
+
 - name: PROJECT_VERSION
   value: '$(Build.SourceBranchName)-$(Build.BuildId)'
+
+# Default Coverity names (you can override in the UI at queue time)
 - name: COVERITY_PROJECT_NAME
-  value: $(Build.Repository.Name)
+  value: '$(Build.Repository.Name)'
+
 - name: COVERITY_STREAM_NAME
-  value: $(Build.SourceBranchName)
+  value: '$(Build.SourceBranchName)'
+
 # Expected secrets (either via the group above or set in the pipeline UI):
 #   BD_URL, BD_TOKEN
 #   COV_URL, COV_USER, COV_PASSPHRASE
-# (Optionally COV_STREAM if you later do Coverity build/capture)
 
 stages:
 
@@ -70,7 +76,7 @@ stages:
   dependsOn: Build
   jobs:
 
-  # ---- Black Duck SCA (new-style inputs) ----
+  # ---- Black Duck SCA (Bridge) ----
   - job: BlackDuckSCA
     displayName: Black Duck SCA (Bridge)
     steps:
@@ -81,34 +87,20 @@ stages:
 
     - task: BlackDuckSecurityScan@2.2.0
       displayName: 'Black Duck scan (Bridge)'
-      # Optional env settings that Detect respects
       env:
         DETECT_PROJECT_NAME: $(PROJECT_NAME)
         DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
-        # Temporarily skip Detect self-update (useful in restricted egress)
         DETECT_SELF_UPDATE_DISABLED: "true"
-        # If your org uses a proxy, uncomment & set these (and tune NO_PROXY):
+        # If your org uses a proxy, uncomment & adjust NO_PROXY:
         # HTTPS_PROXY: $(HTTPS_PROXY)
-        # HTTP_PROXY: $(HTTP_PROXY)
-        # NO_PROXY: "localhost,127.0.0.1,${BD_URL},${COV_URL}"
+        # HTTP_PROXY:  $(HTTP_PROXY)
+        # NO_PROXY: "localhost,127.0.0.1,44.241.196.24,$(COV_URL),$(BD_URL)"
       inputs:
-        # New-style inputs per Bridge docs
         BLACKDUCKSCA_URL: $(BD_URL)
         BLACKDUCKSCA_TOKEN: $(BD_TOKEN)
+        NETWORK_SSL_TRUSTALL: true   # temporary; prefer installing your CA
 
-        # TEMPORARY trust for self-signed/private CAs.
-        # Replace with NETWORK_SSL_CERT_FILE or install your CA on the agent, then remove this.
-        NETWORK_SSL_TRUSTALL: true
-
-        # Optional: Generate SARIF and publish elsewhere if you like
-        # BLACKDUCKSCA_REPORTS_SARIF_CREATE: true
-        # MARK_BUILD_STATUS: 'SucceededWithIssues'
-
-        # Optional: If you also want to scan the built Docker image, set env for tag and add:
-        # DETECT_TOOLS: "SIGNATURE_SCAN"
-        # DETECT_DOCKER_IMAGE: "webgoat/webgoat:$(tag)"
-
-  # ---- Coverity (connect/thin-client bootstrap) ----
+  # ---- Coverity (Bridge connect / thin-client bootstrap) ----
   - job: Coverity
     displayName: Coverity (Bridge)
     steps:
@@ -117,25 +109,43 @@ stages:
         ./mvnw -v
       displayName: JDK sanity
 
+    # Sanitize project/stream names (no slashes/spaces/etc.)
+    - bash: |
+        set -euo pipefail
+        PROJ="$(echo '$(COVERITY_PROJECT_NAME)')"
+        STRM="$(echo '$(COVERITY_STREAM_NAME)')"
+        sanitize () { echo "$1" | tr '/ ' '--' | sed -E 's/[^A-Za-z0-9._-]/-/g' | cut -c1-200; }
+        PROJ_CLEAN="$(sanitize "$PROJ")"
+        STRM_CLEAN="$(sanitize "$STRM")"
+        echo "Coverity Project: $PROJ_CLEAN"
+        echo "Coverity Stream : $STRM_CLEAN"
+        echo "##vso[task.setvariable variable=COVERITY_PROJECT_NAME_CLEAN]$PROJ_CLEAN"
+        echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME_CLEAN]$STRM_CLEAN"
+      displayName: "Sanitize Coverity project/stream names"
+
+    # (Optional) quick connectivity check from the agent
+    - bash: |
+        set -x
+        curl -vk --connect-timeout 10 "$(COV_URL)/api/v2/scans/toolslist" || true
+        which nc && nc -vz -w 5 $(echo $(COV_URL) | sed -E 's@^https?://([^:/]+).*$@\1@') 8080 || true
+      displayName: "Connectivity check to Coverity"
+      continueOnError: true
+
     - task: BlackDuckSecurityScan@2.2.0
       displayName: 'Coverity scan (Bridge)'
-      # If you need proxy here too, mirror the env pattern from SCA
-      # env:
-      #   HTTPS_PROXY: $(HTTPS_PROXY)
-      #   HTTP_PROXY: $(HTTP_PROXY)
-      #   NO_PROXY: "localhost,127.0.0.1,${BD_URL},${COV_URL}"
       env:
-        COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
-        COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)
-      
+        COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME_CLEAN)
+        COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME_CLEAN)
+        # If you need a proxy, mirror the SCA env above and tune NO_PROXY:
+        # HTTPS_PROXY: $(HTTPS_PROXY)
+        # HTTP_PROXY:  $(HTTP_PROXY)
+        # NO_PROXY: "localhost,127.0.0.1,44.241.196.24,$(COV_URL),$(BD_URL)"
       inputs:
-        COVERITY_URL: $(COV_URL)              
+        COVERITY_URL: $(COV_URL)
         COVERITY_USER: $(COV_USER)
         COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
+        NETWORK_SSL_TRUSTALL: true   # only needed if using HTTPS with self-signed
 
-        # TEMPORARY trust for self-signed/private CAs
-        NETWORK_SSL_TRUSTALL: true
-
-        # If/when you run a Coverity capture/build via Bridge thin client,
-        # you can add the appropriate build configuration or use a coverity.yaml.
-        # For simple "connect"/post-scan, the fields above are sufficient.
+        # If/when you add a full Coverity build/capture, configure it here
+        # (or provide a coverity.yaml). For simple connect/post-scan,
+        # the fields above are sufficient.
