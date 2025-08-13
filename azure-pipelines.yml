@@ -5,6 +5,8 @@ pool:
   name: "Self-Hosted ADO Agent"
 
 variables:
+# If you store secrets in a Variable Group, include it here:
+# - group: synopsys-secrets
   tag: '$(Build.BuildId)'
   PROJECT_NAME: 'WebGoat-Azure'
   PROJECT_VERSION: '$(Build.SourceBranchName)-$(Build.BuildId)'
@@ -67,7 +69,7 @@ stages:
       displayName: Generate bridge.yml
 
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: 'Black Duck scan (Bridge)'
+      displayName: 'Black Duck SCA Scan (Bridge)'
       inputs:
         bridge_installation_type: 'download'
         include_blackduck: true
@@ -77,8 +79,8 @@ stages:
         additional_args: >-
           --config bridge.yml
           --diagnostic
-          --network.ssl.trustAll=true          # <-- trust all SSL certs (quickest)
-          # or: --blackduck.trust.cert=true    # Detect-style flag that also works
+          --network.ssl.trustAll=true
+          --detect.self.update.disabled=true
 
   - job: Coverity
     steps:
@@ -88,7 +90,7 @@ stages:
       displayName: JDK sanity
 
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: Coverity scan (Bridge)
+      displayName: Coverity Scan (Bridge)
       inputs:
         bridge_installation_type: 'download'
         include_blackduck: false
@@ -96,4 +98,7 @@ stages:
         coverity_url: '$(COV_URL)'
         coverity_user: '$(COV_USER)'
         coverity_passphrase: '$(COV_PASSPHRASE)'
-        additional_args: '--config bridge.yml --diagnostic'
+        additional_args: >-
+          --config bridge.yml
+          --diagnostic
+          --network.ssl.trustAll=true
