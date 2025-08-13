@@ -1,36 +1,57 @@
 trigger:
 - main
 
+# Run everything on your self-hosted agent
 pool:
   name: "Self-Hosted ADO Agent"
 
+# -----------------------------
+# Variables & (optional) secrets
+# -----------------------------
 variables:
-# If you store secrets in a Variable Group, include it here:
+# If you store secrets in a Library variable group, include it here:
 # - group: synopsys-secrets
-  tag: '$(Build.BuildId)'
-  PROJECT_NAME: 'WebGoat-Azure'
-  PROJECT_VERSION: '$(Build.SourceBranchName)-$(Build.BuildId)'
+- name: tag
+  value: '$(Build.BuildId)'
+- name: PROJECT_NAME
+  value: 'WebGoat-Azure'
+- name: PROJECT_VERSION
+  value: '$(Build.SourceBranchName)-$(Build.BuildId)'
+
+# Expected secrets (either via the group above or set in the pipeline UI):
+#   BD_URL, BD_TOKEN
+#   COV_URL, COV_USER, COV_PASSPHRASE
+# (Optionally COV_STREAM if you later do Coverity build/capture)
 
 stages:
+
+# =====================
+# 1) Build from source
+# =====================
 - stage: Build
+  displayName: Build WebGoat + image
   jobs:
   - job: Build
+    displayName: Build
     steps:
     - script: |
+        echo "== Env sanity =="
         whoami
         id
         docker version
         java -version
-      displayName: Env + Docker sanity
+      displayName: Env + Docker + JDK sanity
 
+    # Build the JAR with the Maven wrapper (per OWASP instructions)
     - script: |
         chmod +x ./mvnw
         ./mvnw -v
-        ./mvnw clean install
-      displayName: Build WebGoat with mvnw (JDK 23 on host)
+        ./mvnw -B clean install
+      displayName: Build WebGoat with mvnw (produces target/webgoat-*.jar)
 
+    # Now the Dockerfile's COPY of target/webgoat-*.jar will succeed
     - task: Docker@2
-      displayName: Build image
+      displayName: Build Docker image
       inputs:
         command: build
         dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
@@ -38,51 +59,55 @@ stages:
         tags: |
           $(tag)
 
+# =========================
+# 2) Security scans (Bridge)
+# =========================
 - stage: Security
+  displayName: Security Scans
   dependsOn: Build
   jobs:
+
+  # ---- Black Duck SCA (new-style inputs) ----
   - job: BlackDuckSCA
+    displayName: Black Duck SCA (Bridge)
     steps:
     - script: |
         java -version
         ./mvnw -v
       displayName: JDK sanity
 
-    - script: |
-        cat > bridge.yml <<'YAML'
-        blackduck:
-          url: ${BD_URL}
-          token: ${BD_TOKEN}
-          project:
-            name: ${PROJECT_NAME}
-            version: ${PROJECT_VERSION}
-        coverity:
-          connect:
-            url: ${COV_URL}
-            user: ${COV_USER}
-            passphrase: ${COV_PASSPHRASE}
-            stream: ${COV_STREAM}
-          build:
-            cleanCommand: ./mvnw -B -DskipTests clean
-            buildCommand: ./mvnw -B -DskipTests package
-        YAML
-      displayName: Generate bridge.yml
-
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: 'Black Duck SCA Scan (Bridge)'
+      displayName: 'Black Duck scan (Bridge)'
+      # Optional env settings that Detect respects
+      env:
+        DETECT_PROJECT_NAME: $(PROJECT_NAME)
+        DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
+        # Temporarily skip Detect self-update (useful in restricted egress)
+        DETECT_SELF_UPDATE_DISABLED: "true"
+        # If your org uses a proxy, uncomment & set these (and tune NO_PROXY):
+        # HTTPS_PROXY: $(HTTPS_PROXY)
+        # HTTP_PROXY: $(HTTP_PROXY)
+        # NO_PROXY: "localhost,127.0.0.1,${BD_URL},${COV_URL}"
       inputs:
-        bridge_installation_type: 'download'
-        include_blackduck: true
-        include_coverity: false
-        blackduck_url: '$(BD_URL)'
-        blackduck_token: '$(BD_TOKEN)'
-        additional_args: >-
-          --config bridge.yml
-          --diagnostic
-          --network.ssl.trustAll=true
-          --detect.self.update.disabled=true
+        # New-style inputs per Bridge docs
+        BLACKDUCKSCA_URL: $(BD_URL)
+        BLACKDUCKSCA_TOKEN: $(BD_TOKEN)
 
+        # TEMPORARY trust for self-signed/private CAs.
+        # Replace with NETWORK_SSL_CERT_FILE or install your CA on the agent, then remove this.
+        NETWORK_SSL_TRUSTALL: true
+
+        # Optional: Generate SARIF and publish elsewhere if you like
+        # BLACKDUCKSCA_REPORTS_SARIF_CREATE: true
+        # MARK_BUILD_STATUS: 'SucceededWithIssues'
+
+        # Optional: If you also want to scan the built Docker image, set env for tag and add:
+        # DETECT_TOOLS: "SIGNATURE_SCAN"
+        # DETECT_DOCKER_IMAGE: "webgoat/webgoat:$(tag)"
+
+  # ---- Coverity (connect/thin-client bootstrap) ----
   - job: Coverity
+    displayName: Coverity (Bridge)
     steps:
     - script: |
         java -version
@@ -90,15 +115,20 @@ stages:
       displayName: JDK sanity
 
     - task: BlackDuckSecurityScan@2.2.0
-      displayName: Coverity Scan (Bridge)
+      displayName: 'Coverity scan (Bridge)'
+      # If you need proxy here too, mirror the env pattern from SCA
+      # env:
+      #   HTTPS_PROXY: $(HTTPS_PROXY)
+      #   HTTP_PROXY: $(HTTP_PROXY)
+      #   NO_PROXY: "localhost,127.0.0.1,${BD_URL},${COV_URL}"
       inputs:
-        bridge_installation_type: 'download'
-        include_blackduck: false
-        include_coverity: true
-        coverity_url: '$(COV_URL)'
-        coverity_user: '$(COV_USER)'
-        coverity_passphrase: '$(COV_PASSPHRASE)'
-        additional_args: >-
-          --config bridge.yml
-          --diagnostic
-          --network.ssl.trustAll=true
+        COVERITY_URL: $(COV_URL)              # Prefer https://host:8443 if available
+        COVERITY_USER: $(COV_USER)
+        COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
+
+        # TEMPORARY trust for self-signed/private CAs
+        # NETWORK_SSL_TRUSTALL: true
+
+        # If/when you run a Coverity capture/build via Bridge thin client,
+        # you can add the appropriate build configuration or use a coverity.yaml.
+        # For simple "connect"/post-scan, the fields above are sufficient.
