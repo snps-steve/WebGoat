@@ -17,7 +17,10 @@ variables:
   value: 'WebGoat-Azure'
 - name: PROJECT_VERSION
   value: '$(Build.SourceBranchName)-$(Build.BuildId)'
-
+- name: COVERITY_PROJECT_NAME
+  value: $(Build.Repository.Name)
+- name: COVERITY_STREAM_NAME
+  value: $(Build.SourceBranchName)
 # Expected secrets (either via the group above or set in the pipeline UI):
 #   BD_URL, BD_TOKEN
 #   COV_URL, COV_USER, COV_PASSPHRASE
@@ -121,6 +124,10 @@ stages:
       #   HTTPS_PROXY: $(HTTPS_PROXY)
       #   HTTP_PROXY: $(HTTP_PROXY)
       #   NO_PROXY: "localhost,127.0.0.1,${BD_URL},${COV_URL}"
+      env:
+        COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
+        COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)
+      
       inputs:
         COVERITY_URL: $(COV_URL)              
         COVERITY_USER: $(COV_USER)
