@@ -126,9 +126,13 @@ stages:
     # (Optional) quick connectivity check from the agent
     - bash: |
         set -x
-        curl -vk --connect-timeout 10 "$(COV_URL)/api/v2/scans/toolslist" || true
-        which nc && nc -vz -w 5 $(echo $(COV_URL) | sed -E 's@^https?://([^:/]+).*$@\1@') 8080 || true
-      displayName: "Connectivity check to Coverity"
+        echo "Agent egress IP (public):" 
+        curl -s https://ifconfig.me || curl -s https://api.ipify.org
+        echo
+        echo "curl to toolslist (10s timeout):"
+        curl -vk --connect-timeout 10 http://44.241.196.24:8080/api/v2/scans/toolslist || true
+        command -v nc && nc -vz -w 5 44.241.196.24 8080 || true
+        displayName: "Connectivity check to Coverity"
       continueOnError: true
 
     - task: BlackDuckSecurityScan@2.2.0
