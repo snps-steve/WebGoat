@@ -127,7 +127,7 @@ stages:
         COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
 
         # TEMPORARY trust for self-signed/private CAs
-        # NETWORK_SSL_TRUSTALL: true
+        NETWORK_SSL_TRUSTALL: true
 
         # If/when you run a Coverity capture/build via Bridge thin client,
         # you can add the appropriate build configuration or use a coverity.yaml.
