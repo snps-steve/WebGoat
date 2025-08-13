@@ -24,7 +24,7 @@ stages:
     - script: |
         chmod +x ./mvnw
         ./mvnw -v
-        ./mvnw -B clean install
+        ./mvnw clean install
       displayName: Build WebGoat with mvnw (JDK 23 on host)
 
     - task: Docker@2
