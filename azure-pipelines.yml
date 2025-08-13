@@ -122,7 +122,7 @@ stages:
       #   HTTP_PROXY: $(HTTP_PROXY)
       #   NO_PROXY: "localhost,127.0.0.1,${BD_URL},${COV_URL}"
       inputs:
-        COVERITY_URL: $(COV_URL)              # Prefer https://host:8443 if available
+        COVERITY_URL: $(COV_URL)              
         COVERITY_USER: $(COV_USER)
         COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
 
