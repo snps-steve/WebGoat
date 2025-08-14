@@ -139,3 +139,4 @@ stages:
           COVERITY_USER: $(COV_USER)
           COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
           NETWORK_SSL_TRUSTALL: true            # only affects HTTPS; harmless on HTTP
+          BRIDGE_COVERITY_LOCAL: true           # 
