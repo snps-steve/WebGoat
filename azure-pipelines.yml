@@ -68,72 +68,74 @@ stages:
   - job: BlackDuckSCA
     displayName: Black Duck SCA (Bridge)
     steps:
-    - script: |
-        java -version
-        ./mvnw -v
-      displayName: JDK sanity
+      - script: |
+          java -version
+          ./mvnw -v
+        displayName: JDK sanity
 
-    - task: BlackDuckSecurityScan@2.2.0
-      displayName: Black Duck scan (Bridge)
-      env:
-        DETECT_PROJECT_NAME: $(PROJECT_NAME)
-        DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
-        DETECT_SELF_UPDATE_DISABLED: "true"
-        # HTTPS_PROXY: $(HTTPS_PROXY)
-        # HTTP_PROXY:  $(HTTP_PROXY)
-        # NO_PROXY: "localhost,127.0.0.1,$(COV_URL),$(BD_URL)"
-      inputs:
-        BLACKDUCKSCA_URL: $(BD_URL)
-        BLACKDUCKSCA_TOKEN: $(BD_TOKEN)
-        NETWORK_SSL_TRUSTALL: true   # temp; prefer installing CA
+      - task: BlackDuckSecurityScan@2.2.0
+        displayName: Black Duck scan (Bridge)
+        env:
+          DETECT_PROJECT_NAME: $(PROJECT_NAME)
+          DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
+          DETECT_SELF_UPDATE_DISABLED: "true"
+          # HTTPS_PROXY: $(HTTPS_PROXY)
+          # HTTP_PROXY:  $(HTTP_PROXY)
+          # NO_PROXY: "localhost,127.0.0.1,$(COV_URL),$(BD_URL)"
+        inputs:
+          BLACKDUCKSCA_URL: $(BD_URL)
+          BLACKDUCKSCA_TOKEN: $(BD_TOKEN)
+          NETWORK_SSL_TRUSTALL: true   # temp; prefer installing CA
 
   # ---- Coverity (Bridge connect / thin-client bootstrap) ----
   - job: Coverity
     displayName: Coverity (Bridge)
     steps:
-    - script: |
-        java -version
-        ./mvnw -v
-      displayName: JDK sanity
+      - script: |
+          java -version
+          ./mvnw -v
+        displayName: JDK sanity
 
-    # Sanitize and OVERWRITE base vars so the task’s pre-check sees them
-    - bash: |
-        set -euo pipefail
-        PROJ_RAW='$(COVERITY_PROJECT_NAME)'
-        STRM_RAW='$(COVERITY_STREAM_NAME)'
-        sanitize () { echo "$1" | tr '/ ' '--' | sed -E 's/[^A-Za-z0-9._-]/-/g' | cut -c1-200; }
-        PROJ_CLEAN="$(sanitize "$PROJ_RAW")"
-        STRM_CLEAN="$(sanitize "$STRM_RAW")"
-        echo "Coverity Project (raw -> clean): $PROJ_RAW -> $PROJ_CLEAN"
-        echo "Coverity Stream  (raw -> clean): $STRM_RAW -> $STRM_CLEAN"
-        echo "##vso[task.setvariable variable=COVERITY_PROJECT_NAME]$PROJ_CLEAN"
-        echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME]$STRM_CLEAN"
-      displayName: Sanitize Coverity project/stream names
+      # Sanitize names (kept as-is)
+      - bash: |
+          set -euo pipefail
+          PROJ_RAW='$(COVERITY_PROJECT_NAME)'
+          STRM_RAW='$(COVERITY_STREAM_NAME)'
+          sanitize () { echo "$1" | tr '/ ' '--' | sed -E 's/[^A-Za-z0-9._-]/-/g' | cut -c1-200; }
+          PROJ_CLEAN="$(sanitize "$PROJ_RAW")"
+          STRM_CLEAN="$(sanitize "$STRM_RAW")"
+          echo "Coverity Project (raw -> clean): $PROJ_RAW -> $PROJ_CLEAN"
+          echo "Coverity Stream  (raw -> clean): $STRM_RAW -> $STRM_CLEAN"
+          echo "##vso[task.setvariable variable=COVERITY_PROJECT_NAME]$PROJ_CLEAN"
+          echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME]$STRM_CLEAN"
+        displayName: Sanitize Coverity project/stream names
 
-    # Optional: quick HTTPS reachability check
-    - bash: |
-        set -x
-        echo "Agent egress IP:"; curl -s https://ifconfig.me || curl -s https://api.ipify.org; echo
-        curl -vk --connect-timeout 10 $(COV_URL)/api/v2/scans/toolslist || true
-        env | grep -E '^COVERITY_(PROJECT_NAME|STREAM_NAME)=' || true
-        command -v nc && nc -vz -w 5 \
-          $(echo $(COV_URL) | sed -E 's@^https?://([^:/]+).*$@\1@') \
-          $(echo $(COV_URL) | sed -nE 's@^https?://[^:/]+:([0-9]+).*@\1@p' | awk '{print ($0=="")?8443:$0}')
-      displayName: Connectivity check to Coverity (HTTPS)
-    # keep or drop next line; leaving errors here won’t block the real task
-      continueOnError: true
+      # Connectivity check that respects your scheme in COV_URL
+      - bash: |
+          set -euo pipefail
+          echo "Agent egress IP:"; (curl -s https://ifconfig.me || curl -s https://api.ipify.org); echo
+          URL="$(echo '$(COV_URL)' | sed 's#/*$##')"
+          HOST="$(echo "$URL" | sed -E 's@^https?://([^:/]+).*$@\1@')"
+          PORT="$(echo "$URL" | sed -nE 's@^https?://[^:/]+:([0-9]+).*@\1@p')"
+          SCHEME="$(echo "$URL" | sed -E 's@^(https?)://.*@\1@')"
+          [ -z "$PORT" ] && PORT=$([ "$SCHEME" = https ] && echo 8443 || echo 8080)
+          echo "Testing $SCHEME to $HOST:$PORT ..."
+          # Try the tools list endpoint Bridge calls during connect
+          if ! curl -fsS -m 10 "$SCHEME://$HOST:$PORT/api/v2/scans/toolslist" >/dev/null; then
+            echo "ERROR: Cannot reach $SCHEME://$HOST:$PORT from this agent."
+            echo "       Open the firewall/SG to this agent IP or move the agent inside the network."
+            exit 86
+          fi
+          echo "OK: $SCHEME://$HOST:$PORT is reachable."
+        displayName: Connectivity check to Coverity
 
-    - task: BlackDuckSecurityScan@2.2.0
-      displayName: Coverity scan (Bridge)
-      env:
-        COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)   # now sanitized
-        COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)    # now sanitized
-        # HTTPS_PROXY: $(HTTPS_PROXY)
-        # HTTP_PROXY:  $(HTTP_PROXY)
-        # NO_PROXY: "localhost,127.0.0.1,coverity.mycorp.local"
-      inputs:
-        COVERITY_URL: $(COV_URL)             # e.g., https://coverity.mycorp.local:8443
-        COVERITY_USER: $(COV_USER)
-        COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
-        NETWORK_SSL_TRUSTALL: true           # ok for testing; install CA later
-
+      - task: BlackDuckSecurityScan@2.2.0
+        displayName: Coverity scan (Bridge)
+        env:
+          COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
+          COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)
+        inputs:
+          COVERITY_URL: $(COV_URL)              # e.g., http://44.241.196.24:8080  OR  https://44.241.196.24:8443
+          COVERITY_USER: $(COV_USER)
+          COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
+          NETWORK_SSL_TRUSTALL: true            # only affects HTTPS; harmless on HTTP
