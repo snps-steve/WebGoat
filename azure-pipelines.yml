@@ -43,7 +43,18 @@ steps:
     set -ex
     echo "Building WebGoat from source..."
     chmod +x ./mvnw
-    ./mvnw clean install -DskipTests
+    
+    # Option 1: Override Maven compiler version to match installed Java
+    echo "Building with Java 21 compatibility..."
+    ./mvnw clean install -DskipTests \
+      -Dmaven.compiler.source=21 \
+      -Dmaven.compiler.target=21 \
+      -Dmaven.compiler.release=21
+      
+    # Option 2: Alternative - disable release parameter (uncomment if above fails)
+    # ./mvnw clean install -DskipTests \
+    #   -Dmaven.compiler.source=21 \
+    #   -Dmaven.compiler.target=21
   displayName: 'Build WebGoat'
 
 # Black Duck SCA Scan using Security Scan Extension
