@@ -47,8 +47,8 @@ stages:
         java -version || true
       displayName: "Env + Docker + JDK sanity"
 
-    # Install Playwright deps by invoking the CLI in the module that declares it.
-    # Falls back to apt-get installing common libs if the module is not found.
+    # Install Playwright's required system libraries on Ubuntu directly via apt.
+    # If the agent user doesn't have passwordless sudo, flip SKIP_UI_TESTS=true so the build continues.
     - bash: |
         set -euo pipefail
         if [ "$(echo "${SKIP_UI_TESTS}")" = "true" ]; then
@@ -57,45 +57,31 @@ stages:
         fi
 
         if ! command -v apt-get >/dev/null 2>&1; then
-          echo "apt-get not found; skipping Playwright deps install."
+          echo "apt-get not found; cannot install Playwright deps; skipping UI tests."
+          echo "##vso[task.setvariable variable=SKIP_UI_TESTS]true"
           exit 0
         fi
 
-        # Find a pom.xml that declares com.microsoft.playwright (module with UI tests)
-        POM_PATH="$(grep -RIl --include='pom.xml' '<groupId>com.microsoft.playwright</groupId>' . | head -n1 || true)"
-        if [ -n "${POM_PATH}" ]; then
-          MOD_DIR="$(dirname "${POM_PATH}")"
-          echo "Found Playwright module at: ${MOD_DIR}"
-
-          # Choose mvn or mvnw
-          if command -v mvn >/dev/null 2>&1; then
-            MVN_CMD="mvn"
-          else
-            chmod +x ./mvnw
-            MVN_CMD="./mvnw"
-          fi
-
-          # Install host deps and Chromium browser via the Playwright Java CLI
-          echo "Installing Playwright host dependencies via CLI..."
-          (cd "${MOD_DIR}" && sudo -n ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install-deps") \
-          || (cd "${MOD_DIR}" && ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install-deps")
-
-          echo "Installing Playwright Chromium browser..."
-          (cd "${MOD_DIR}" && sudo -n ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium") \
-          || (cd "${MOD_DIR}" && ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium")
-
-          echo "Playwright dependencies and browser installed."
-        else
-          echo "No module with com.microsoft.playwright found; installing common OS libs..."
-          sudo -n apt-get update
-          # Try generic package names first, then t64 variants as needed
-          sudo -n apt-get install -y --no-install-recommends libgtk-3-0 || sudo -n apt-get install -y libgtk-3-0t64
-          sudo -n apt-get install -y --no-install-recommends \
-            libnss3 libx11-xcb1 libxcomposite1 libxdamage1 libxfixes3 libdrm2 libgbm1 libasound2 libcups2 \
-            libatk-bridge2.0-0 libatspi2.0-0 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 libxrandr2 libxshmfence1 || true
-          echo "OS libs installed."
+        if ! sudo -n true 2>/dev/null; then
+          echo "No passwordless sudo; cannot install Playwright deps; skipping UI tests."
+          echo "##vso[task.setvariable variable=SKIP_UI_TESTS]true"
+          exit 0
         fi
-      displayName: "Install Playwright browser deps (Linux)"
+
+        echo "Installing Playwright system libraries..."
+        sudo -n apt-get update
+        # Try generic GTK3 first, fall back to the 24.04 't64' package name.
+        sudo -n apt-get install -y --no-install-recommends libgtk-3-0 || \
+        sudo -n apt-get install -y --no-install-recommends libgtk-3-0t64
+
+        # Common Playwright runtime deps
+        sudo -n apt-get install -y --no-install-recommends \
+          libnss3 libnspr4 libx11-6 libx11-xcb1 libxcb1 libxext6 libxcomposite1 \
+          libxdamage1 libxfixes3 libxrandr2 libgbm1 libdrm2 libasound2 libcups2 \
+          libatk-bridge2.0-0 libatspi2.0-0 libpangocairo-1.0-0 libpango-1.0-0 \
+          libcairo2 libxshmfence1 libxkbcommon0 fonts-liberation libcurl4 ca-certificates
+        echo "Playwright system libraries installed."
+      displayName: "Install Playwright system libraries (Ubuntu)"
       condition: and(succeeded(), ne(variables['SKIP_UI_TESTS'], 'true'))
 
     # Build with or without tests depending on SKIP_UI_TESTS
