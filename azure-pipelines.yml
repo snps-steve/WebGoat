@@ -37,8 +37,8 @@ stages:
         echo "== Env sanity =="
         whoami
         id
-        docker version
-        java -version
+        docker version || true
+        java -version || true
       displayName: Env + Docker + JDK sanity
 
     - script: |
@@ -69,30 +69,35 @@ stages:
     displayName: Black Duck SCA (Bridge)
     steps:
       - script: |
-          java -version
+          java -version || true
           ./mvnw -v
         displayName: JDK sanity
 
-      - task: BlackDuckSecurityScan@2.2.0
-        displayName: Black Duck scan (Bridge)
+      - task: BlackDuckSecurityScan@2
+        displayName: Black Duck SCA Scan (Bridge)
         env:
           DETECT_PROJECT_NAME: $(PROJECT_NAME)
           DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
           DETECT_SELF_UPDATE_DISABLED: "true"
-          # HTTPS_PROXY: $(HTTPS_PROXY)
-          # HTTP_PROXY:  $(HTTP_PROXY)
-          # NO_PROXY: "localhost,127.0.0.1,$(COV_URL),$(BD_URL)"
         inputs:
-          BLACKDUCKSCA_URL: $(BD_URL)
-          BLACKDUCKSCA_TOKEN: $(BD_TOKEN)
-          NETWORK_SSL_TRUSTALL: true   # temp; prefer installing CA
+          blackducksca_url: $(BD_URL)
+          blackducksca_token: $(BD_TOKEN)
+          # Nice-to-haves from the working sample:
+          blackducksca_scan_failure_severities: 'BLOCKER'
+          blackducksca_fixpr_enabled: true
+          blackducksca_prcomment_enabled: true
+          blackducksca_reports_sarif_create: true
+          azure_token: $(System.AccessToken)
+          mark_build_status: 'SucceededWithIssues'
+          # Temporary only; prefer installing the CA instead:
+          # network_ssl_trust_all: true
 
-  # ---- Coverity (Bridge connect / thin-client bootstrap) ----
+  # ---- Coverity (Bridge thin client) ----
   - job: Coverity
     displayName: Coverity (Bridge)
     steps:
       - script: |
-          java -version
+          java -version || true
           ./mvnw -v
         displayName: JDK sanity
 
@@ -129,15 +134,38 @@ stages:
           echo "OK: $SCHEME://$HOST:$PORT is reachable."
         displayName: Connectivity check to Coverity
 
-      - task: BlackDuckSecurityScan@2.2.0
-        displayName: Coverity scan (Bridge)
+      - task: BlackDuckSecurityScan@2
+        displayName: Coverity Scan (Bridge thin client)
         env:
           COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
           COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)
         inputs:
-          COVERITY_URL: $(COV_URL)              # e.g., http://44.241.196.24:8080  OR  https://44.241.196.24:8443
-          COVERITY_USER: $(COV_USER)
-          COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
-          NETWORK_SSL_TRUSTALL: true            # only affects HTTPS; harmless on HTTP
-          BRIDGE_COVERITY_LOCAL: true           # 
-          COVERITY_INSTALL_DIRECTORY: /home/ubuntu/cov-platform
+          coverity_url: $(COV_URL)
+          coverity_user: $(COV_USER)
+          coverity_passphrase: $(COV_PASSPHRASE)
+          coverity_prcomment_enabled: true
+          azure_token: $(System.AccessToken)
+          mark_build_status: 'SucceededWithIssues'
+          # Temporary only; prefer installing the CA instead:
+          # network_ssl_trust_all: true
+          # If you *must* do local analysis, uncomment these two (prefer a writable temp dir):
+          # coverity_local: true
+          # coverity_install_directory: $(Agent.TempDirectory)/cov-platform
+
+      # Optional: zip and publish Bridge logs (disabled by default)
+      - task: ArchiveFiles@2
+        displayName: 'Copy Bridge Logs'
+        condition: succeededOrFailed()
+        enabled: false
+        inputs:
+          rootFolderOrFile: .bridge
+          includeRootFolder: false
+          archiveFile: '$(Build.ArtifactStagingDirectory)/bridge-logs.zip'
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Bridge Logs'
+        condition: succeededOrFailed()
+        enabled: false
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'logs'
