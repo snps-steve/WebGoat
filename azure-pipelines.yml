@@ -1,5 +1,5 @@
 # Complete ADO pipeline: Build WebGoat, then run Black Duck SCA and Coverity via Bridge
-# Self-hosted agent expected (Ubuntu). Requires Java, Maven (or mvnw), Docker.
+# Self-hosted agent expected (Ubuntu 24.04+). Requires Java, Maven (or mvnw), Docker.
 # Secrets expected as pipeline vars or variable group:
 #   BD_URL, BD_TOKEN
 #   COV_URL (e.g., https://coverity.mycorp.local:8443), COV_USER, COV_PASSPHRASE
@@ -70,7 +70,7 @@ stages:
 
         echo "Installing Playwright system libraries..."
         sudo -n apt-get update
-        # Try generic GTK3 first, fall back to the 24.04 't64' package name.
+        # GTK3 (24.04 uses t64); try classic then t64
         sudo -n apt-get install -y --no-install-recommends libgtk-3-0 || \
         sudo -n apt-get install -y --no-install-recommends libgtk-3-0t64
 
@@ -80,16 +80,47 @@ stages:
           libxdamage1 libxfixes3 libxrandr2 libgbm1 libdrm2 libasound2 libcups2 \
           libatk-bridge2.0-0 libatspi2.0-0 libpangocairo-1.0-0 libpango-1.0-0 \
           libcairo2 libxshmfence1 libxkbcommon0 fonts-liberation libcurl4 ca-certificates
-        echo "Playwright system libraries installed."
+
+        # X virtual framebuffer (for non-headless tests)
+        sudo -n apt-get install -y --no-install-recommends xvfb
+        echo "Playwright system libraries and Xvfb installed."
       displayName: "Install Playwright system libraries (Ubuntu)"
       condition: and(succeeded(), ne(variables['SKIP_UI_TESTS'], 'true'))
 
-    # Build with or without tests depending on SKIP_UI_TESTS
-    - script: |
+    # Download Playwright's Chromium browser (now that libs are installed).
+    # We search for the module containing Playwright and run the CLI there.
+    - bash: |
+        set -euo pipefail
+        if [ "$(echo "${SKIP_UI_TESTS}")" = "true" ]; then
+          echo "SKIP_UI_TESTS=true; skipping Playwright browser install."
+          exit 0
+        fi
+
+        POM_PATH="$(grep -RIl --include='pom.xml' '<groupId>com.microsoft.playwright</groupId>' . | head -n1 || true)"
+        if [ -z "${POM_PATH}" ]; then
+          echo "No module with com.microsoft.playwright found; skipping browser install."
+          exit 0
+        fi
+        MOD_DIR="$(dirname "${POM_PATH}")"
+        echo "Playwright module: ${MOD_DIR}"
+
+        if command -v mvn >/dev/null 2>&1; then MVN_CMD="mvn"; else chmod +x ./mvnw; MVN_CMD="./mvnw"; fi
+
+        # Install Chromium browser for Playwright (tolerate re-runs)
+        (cd "${MOD_DIR}" && ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium") || true
+        echo "Playwright Chromium install step completed."
+      displayName: "Install Playwright Chromium browser"
+      condition: and(succeeded(), ne(variables['SKIP_UI_TESTS'], 'true'))
+
+    # Build with or without tests depending on SKIP_UI_TESTS.
+    # When running tests, wrap in Xvfb to avoid GUI timeouts if tests are not headless.
+    - bash: |
+        set -euo pipefail
         chmod +x ./mvnw
         ./mvnw -v
-        ./mvnw -B clean install
-      displayName: "Build WebGoat with mvnw (tests enabled)"
+        echo "Running tests under Xvfb..."
+        xvfb-run -a ./mvnw -B clean install
+      displayName: "Build WebGoat with mvnw (tests enabled, Xvfb)"
       condition: ne(variables['SKIP_UI_TESTS'], 'true')
 
     - script: |
