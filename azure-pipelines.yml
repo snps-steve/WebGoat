@@ -1,5 +1,5 @@
 # Complete ADO pipeline: Build WebGoat, then run Black Duck SCA and Coverity via Bridge
-# Assumes a self-hosted agent with Java, Maven, Docker available.
+# Self-hosted agent expected (Ubuntu). Requires Java, Maven, Docker.
 # Secrets expected as pipeline vars or variable group:
 #   BD_URL, BD_TOKEN
 #   COV_URL (e.g., https://coverity.mycorp.local:8443), COV_USER, COV_PASSPHRASE
@@ -24,6 +24,9 @@ variables:
   value: '$(Build.Repository.Name)'
 - name: COVERITY_STREAM_NAME
   value: '$(Build.SourceBranchName)'
+# Set to 'true' if you prefer skipping UI tests instead of installing system deps.
+- name: SKIP_UI_TESTS
+  value: 'false'
 
 stages:
 
@@ -44,11 +47,36 @@ stages:
         java -version || true
       displayName: "Env + Docker + JDK sanity"
 
+    # Install Playwright browser deps on Ubuntu (only if NOT skipping UI tests)
+    - bash: |
+        set -euo pipefail
+        if command -v apt-get >/dev/null 2>&1; then
+          echo "Installing Playwright host dependencies via CLI..."
+          # Prefer passwordless sudo on the agent; if not present this will fail fast.
+          sudo -n mvn -q exec:java \
+            -Dexec.mainClass=com.microsoft.playwright.CLI \
+            -Dexec.args="install-deps"
+          echo "Playwright host dependencies installed."
+        else
+          echo "apt-get not found; skipping Playwright deps install."
+        fi
+      displayName: "Install Playwright browser deps (Linux)"
+      condition: and(succeeded(), ne(variables['SKIP_UI_TESTS'], 'true'))
+
+    # Build with or without tests depending on SKIP_UI_TESTS
     - script: |
         chmod +x ./mvnw
         ./mvnw -v
         ./mvnw -B clean install
-      displayName: "Build WebGoat with mvnw (produces target/webgoat-*.jar)"
+      displayName: "Build WebGoat with mvnw (tests enabled)"
+      condition: ne(variables['SKIP_UI_TESTS'], 'true')
+
+    - script: |
+        chmod +x ./mvnw
+        ./mvnw -v
+        ./mvnw -B -DskipTests clean install
+      displayName: "Build WebGoat with mvnw (skip tests)"
+      condition: eq(variables['SKIP_UI_TESTS'], 'true')
 
     - task: Docker@2
       displayName: "Build Docker image"
@@ -90,8 +118,7 @@ stages:
           blackducksca_scan_failure_severities: 'BLOCKER'
           blackducksca_reports_sarif_create: true
           mark_build_status: 'SucceededWithIssues'
-          # Optional temporary bypass (prefer installing your CA instead):
-          # network_ssl_trust_all: true
+          # network_ssl_trust_all: true  # temporary only; prefer installing CA
 
       # PR build: enable PR comments + Fix PR (requires azure_token)
       - task: BlackDuckSecurityScan@2
@@ -112,25 +139,7 @@ stages:
           mark_build_status: 'SucceededWithIssues'
           # network_ssl_trust_all: true
 
-      # Optional: publish Bridge logs (disabled by default)
-      - task: ArchiveFiles@2
-        displayName: "Copy Bridge Logs (SCA)"
-        condition: succeededOrFailed()
-        enabled: false
-        inputs:
-          rootFolderOrFile: .bridge
-          includeRootFolder: false
-          archiveFile: '$(Build.ArtifactStagingDirectory)/bridge-logs-sca.zip'
-
-      - task: PublishBuildArtifacts@1
-        displayName: "Publish Bridge Logs (SCA)"
-        condition: succeededOrFailed()
-        enabled: false
-        inputs:
-          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-          ArtifactName: 'logs-sca'
-
-  # ---- Coverity (Bridge thin client) ----
+  # ---- Coverity (Bridge local analysis; no toolslist) ----
   - job: Coverity
     displayName: "Coverity (Bridge)"
     steps:
@@ -153,26 +162,9 @@ stages:
           echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME]$STRM_CLEAN"
         displayName: "Sanitize Coverity project/stream names"
 
-      # Connectivity check to your Coverity URL (respects http/https and custom port)
-      - bash: |
-          set -euo pipefail
-          echo "Agent egress IP:"; (curl -s https://ifconfig.me || curl -s https://api.ipify.org); echo
-          URL="$(echo '$(COV_URL)' | sed 's#/*$##')"
-          HOST="$(echo "$URL" | sed -E 's@^https?://([^:/]+).*$@\1@')"
-          PORT="$(echo "$URL" | sed -nE 's@^https?://[^:/]+:([0-9]+).*@\1@p')"
-          SCHEME="$(echo "$URL" | sed -E 's@^(https?)://.*@\1@')"
-          [ -z "$PORT" ] && PORT=$([ "$SCHEME" = https ] && echo 8443 || echo 8080)
-          echo "Testing $SCHEME to $HOST:$PORT ..."
-          if ! curl -fsS -m 10 "$SCHEME://$HOST:$PORT/api/v2/scans/toolslist" >/dev/null; then
-            echo "ERROR: Cannot reach $SCHEME://$HOST:$PORT from this agent."
-            exit 86
-          fi
-          echo "OK: $SCHEME://$HOST:$PORT is reachable."
-        displayName: "Connectivity check to Coverity"
-
       # Branch/CI build (not a PR): Coverity scan without PR comments
       - task: BlackDuckSecurityScan@2
-        displayName: "Coverity Scan (non-PR)"
+        displayName: "Coverity Scan (non-PR, local analysis)"
         condition: ne(variables['Build.Reason'], 'PullRequest')
         env:
           COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
@@ -181,15 +173,14 @@ stages:
           coverity_url: $(COV_URL)
           coverity_user: $(COV_USER)
           coverity_passphrase: $(COV_PASSPHRASE)
+          coverity_local: true
+          coverity_install_directory: $(Agent.TempDirectory)/cov-platform
           mark_build_status: 'SucceededWithIssues'
-          # If you must do local analysis, uncomment and point to a writable path:
-          # coverity_local: true
-          # coverity_install_directory: $(Agent.TempDirectory)/cov-platform
-          # network_ssl_trust_all: true
+          # network_ssl_trust_all: true  # temporary only; prefer installing CA
 
       # PR build: enable PR comments (requires azure_token)
       - task: BlackDuckSecurityScan@2
-        displayName: "Coverity Scan (PR: comments)"
+        displayName: "Coverity Scan (PR: comments, local analysis)"
         condition: eq(variables['Build.Reason'], 'PullRequest')
         env:
           COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
@@ -198,25 +189,9 @@ stages:
           coverity_url: $(COV_URL)
           coverity_user: $(COV_USER)
           coverity_passphrase: $(COV_PASSPHRASE)
+          coverity_local: true
+          coverity_install_directory: $(Agent.TempDirectory)/cov-platform
           coverity_prcomment_enabled: true
           azure_token: $(System.AccessToken)
           mark_build_status: 'SucceededWithIssues'
           # network_ssl_trust_all: true
-
-      # Optional: publish Bridge logs (disabled by default)
-      - task: ArchiveFiles@2
-        displayName: "Copy Bridge Logs (Coverity)"
-        condition: succeededOrFailed()
-        enabled: false
-        inputs:
-          rootFolderOrFile: .bridge
-          includeRootFolder: false
-          archiveFile: '$(Build.ArtifactStagingDirectory)/bridge-logs-coverity.zip'
-
-      - task: PublishBuildArtifacts@1
-        displayName: "Publish Bridge Logs (Coverity)"
-        condition: succeededOrFailed()
-        enabled: false
-        inputs:
-          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-          ArtifactName: 'logs-coverity'
