@@ -20,13 +20,23 @@ variables:
       value: 'Outstanding Issues'
 
 steps:
-# Install Java 23 (required for WebGoat)
+# Install Java (WebGoat compatible version)
+# Option 1: Use Java 21 (LTS and widely supported)
 - task: JavaToolInstaller@0
-  displayName: 'Install JDK 23'
+  displayName: 'Install JDK 21'
   inputs:
-    versionSpec: 23
+    versionSpec: 21
     jdkArchitectureOption: x64
     jdkSourceOption: PreInstalled
+
+# Option 2: Alternative - Install Java 23 from JDK source (uncomment if Java 21 doesn't work)
+# - task: JavaToolInstaller@0
+#   displayName: 'Install JDK 23 from JDK source'
+#   inputs:
+#     versionSpec: 23
+#     jdkArchitectureOption: x64
+#     jdkSourceOption: JDKFromURL
+#     jdkFile: 'https://download.oracle.com/java/23/latest/jdk-23_linux-x64_bin.tar.gz'
 
 # Build WebGoat from source
 - script: |
