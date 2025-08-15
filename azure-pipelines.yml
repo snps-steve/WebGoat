@@ -1,3 +1,9 @@
+# Complete ADO pipeline: Build WebGoat, then run Black Duck SCA and Coverity via Bridge
+# Assumes a self-hosted agent with Java, Maven, Docker available.
+# Secrets expected as pipeline vars or variable group:
+#   BD_URL, BD_TOKEN
+#   COV_URL (e.g., https://coverity.mycorp.local:8443), COV_USER, COV_PASSPHRASE
+
 trigger:
 - main
 
@@ -18,9 +24,6 @@ variables:
   value: '$(Build.Repository.Name)'
 - name: COVERITY_STREAM_NAME
   value: '$(Build.SourceBranchName)'
-# Secrets expected in pipeline/variable group:
-#   BD_URL, BD_TOKEN
-#   COV_URL (e.g., https://coverity.mycorp.local:8443), COV_USER, COV_PASSPHRASE
 
 stages:
 
@@ -28,10 +31,10 @@ stages:
 # 1) Build from source
 # =====================
 - stage: Build
-  displayName: Build WebGoat + image
+  displayName: "Build WebGoat + image"
   jobs:
   - job: Build
-    displayName: Build
+    displayName: "Build"
     steps:
     - script: |
         echo "== Env sanity =="
@@ -39,16 +42,16 @@ stages:
         id
         docker version || true
         java -version || true
-      displayName: Env + Docker + JDK sanity
+      displayName: "Env + Docker + JDK sanity"
 
     - script: |
         chmod +x ./mvnw
         ./mvnw -v
         ./mvnw -B clean install
-      displayName: Build WebGoat with mvnw (produces target/webgoat-*.jar)
+      displayName: "Build WebGoat with mvnw (produces target/webgoat-*.jar)"
 
     - task: Docker@2
-      displayName: Build Docker image
+      displayName: "Build Docker image"
       inputs:
         command: build
         dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
@@ -60,21 +63,23 @@ stages:
 # 2) Security scans (Bridge)
 # =========================
 - stage: Security
-  displayName: Security Scans
+  displayName: "Security Scans"
   dependsOn: Build
   jobs:
 
   # ---- Black Duck SCA (Bridge) ----
   - job: BlackDuckSCA
-    displayName: Black Duck SCA (Bridge)
+    displayName: "Black Duck SCA (Bridge)"
     steps:
       - script: |
           java -version || true
           ./mvnw -v
-        displayName: JDK sanity
+        displayName: "JDK sanity"
 
+      # Branch/CI build (not a PR): scan + SARIF, no PR features
       - task: BlackDuckSecurityScan@2
-        displayName: Black Duck SCA Scan (Bridge)
+        displayName: "Black Duck SCA Scan (non-PR)"
+        condition: ne(variables['Build.Reason'], 'PullRequest')
         env:
           DETECT_PROJECT_NAME: $(PROJECT_NAME)
           DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
@@ -82,26 +87,59 @@ stages:
         inputs:
           blackducksca_url: $(BD_URL)
           blackducksca_token: $(BD_TOKEN)
-          # Nice-to-haves from the working sample:
           blackducksca_scan_failure_severities: 'BLOCKER'
-          blackducksca_fixpr_enabled: true
-          blackducksca_prcomment_enabled: true
           blackducksca_reports_sarif_create: true
+          mark_build_status: 'SucceededWithIssues'
+          # Optional temporary bypass (prefer installing your CA instead):
+          # network_ssl_trust_all: true
+
+      # PR build: enable PR comments + Fix PR (requires azure_token)
+      - task: BlackDuckSecurityScan@2
+        displayName: "Black Duck SCA Scan (PR: comments + Fix PR)"
+        condition: eq(variables['Build.Reason'], 'PullRequest')
+        env:
+          DETECT_PROJECT_NAME: $(PROJECT_NAME)
+          DETECT_PROJECT_VERSION_NAME: $(PROJECT_VERSION)
+          DETECT_SELF_UPDATE_DISABLED: "true"
+        inputs:
+          blackducksca_url: $(BD_URL)
+          blackducksca_token: $(BD_TOKEN)
+          blackducksca_scan_failure_severities: 'BLOCKER'
+          blackducksca_reports_sarif_create: true
+          blackducksca_prcomment_enabled: true
+          blackducksca_fixpr_enabled: true
           azure_token: $(System.AccessToken)
           mark_build_status: 'SucceededWithIssues'
-          # Temporary only; prefer installing the CA instead:
           # network_ssl_trust_all: true
+
+      # Optional: publish Bridge logs (disabled by default)
+      - task: ArchiveFiles@2
+        displayName: "Copy Bridge Logs (SCA)"
+        condition: succeededOrFailed()
+        enabled: false
+        inputs:
+          rootFolderOrFile: .bridge
+          includeRootFolder: false
+          archiveFile: '$(Build.ArtifactStagingDirectory)/bridge-logs-sca.zip'
+
+      - task: PublishBuildArtifacts@1
+        displayName: "Publish Bridge Logs (SCA)"
+        condition: succeededOrFailed()
+        enabled: false
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'logs-sca'
 
   # ---- Coverity (Bridge thin client) ----
   - job: Coverity
-    displayName: Coverity (Bridge)
+    displayName: "Coverity (Bridge)"
     steps:
       - script: |
           java -version || true
           ./mvnw -v
-        displayName: JDK sanity
+        displayName: "JDK sanity"
 
-      # Sanitize names (kept as-is)
+      # Sanitize names
       - bash: |
           set -euo pipefail
           PROJ_RAW='$(COVERITY_PROJECT_NAME)'
@@ -113,9 +151,9 @@ stages:
           echo "Coverity Stream  (raw -> clean): $STRM_RAW -> $STRM_CLEAN"
           echo "##vso[task.setvariable variable=COVERITY_PROJECT_NAME]$PROJ_CLEAN"
           echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME]$STRM_CLEAN"
-        displayName: Sanitize Coverity project/stream names
+        displayName: "Sanitize Coverity project/stream names"
 
-      # Connectivity check that respects your scheme in COV_URL
+      # Connectivity check to your Coverity URL (respects http/https and custom port)
       - bash: |
           set -euo pipefail
           echo "Agent egress IP:"; (curl -s https://ifconfig.me || curl -s https://api.ipify.org); echo
@@ -125,17 +163,34 @@ stages:
           SCHEME="$(echo "$URL" | sed -E 's@^(https?)://.*@\1@')"
           [ -z "$PORT" ] && PORT=$([ "$SCHEME" = https ] && echo 8443 || echo 8080)
           echo "Testing $SCHEME to $HOST:$PORT ..."
-          # Try the tools list endpoint Bridge calls during connect
           if ! curl -fsS -m 10 "$SCHEME://$HOST:$PORT/api/v2/scans/toolslist" >/dev/null; then
             echo "ERROR: Cannot reach $SCHEME://$HOST:$PORT from this agent."
-            echo "       Open the firewall/SG to this agent IP or move the agent inside the network."
             exit 86
           fi
           echo "OK: $SCHEME://$HOST:$PORT is reachable."
-        displayName: Connectivity check to Coverity
+        displayName: "Connectivity check to Coverity"
 
+      # Branch/CI build (not a PR): Coverity scan without PR comments
       - task: BlackDuckSecurityScan@2
-        displayName: Coverity Scan (Bridge thin client)
+        displayName: "Coverity Scan (non-PR)"
+        condition: ne(variables['Build.Reason'], 'PullRequest')
+        env:
+          COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
+          COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)
+        inputs:
+          coverity_url: $(COV_URL)
+          coverity_user: $(COV_USER)
+          coverity_passphrase: $(COV_PASSPHRASE)
+          mark_build_status: 'SucceededWithIssues'
+          # If you must do local analysis, uncomment and point to a writable path:
+          # coverity_local: true
+          # coverity_install_directory: $(Agent.TempDirectory)/cov-platform
+          # network_ssl_trust_all: true
+
+      # PR build: enable PR comments (requires azure_token)
+      - task: BlackDuckSecurityScan@2
+        displayName: "Coverity Scan (PR: comments)"
+        condition: eq(variables['Build.Reason'], 'PullRequest')
         env:
           COVERITY_PROJECT_NAME: $(COVERITY_PROJECT_NAME)
           COVERITY_STREAM_NAME:  $(COVERITY_STREAM_NAME)
@@ -146,26 +201,22 @@ stages:
           coverity_prcomment_enabled: true
           azure_token: $(System.AccessToken)
           mark_build_status: 'SucceededWithIssues'
-          # Temporary only; prefer installing the CA instead:
           # network_ssl_trust_all: true
-          # If you *must* do local analysis, uncomment these two (prefer a writable temp dir):
-          # coverity_local: true
-          # coverity_install_directory: $(Agent.TempDirectory)/cov-platform
 
-      # Optional: zip and publish Bridge logs (disabled by default)
+      # Optional: publish Bridge logs (disabled by default)
       - task: ArchiveFiles@2
-        displayName: 'Copy Bridge Logs'
+        displayName: "Copy Bridge Logs (Coverity)"
         condition: succeededOrFailed()
         enabled: false
         inputs:
           rootFolderOrFile: .bridge
           includeRootFolder: false
-          archiveFile: '$(Build.ArtifactStagingDirectory)/bridge-logs.zip'
+          archiveFile: '$(Build.ArtifactStagingDirectory)/bridge-logs-coverity.zip'
 
       - task: PublishBuildArtifacts@1
-        displayName: 'Publish Bridge Logs'
+        displayName: "Publish Bridge Logs (Coverity)"
         condition: succeededOrFailed()
         enabled: false
         inputs:
           PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-          ArtifactName: 'logs'
+          ArtifactName: 'logs-coverity'
