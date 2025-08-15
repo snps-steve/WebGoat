@@ -140,3 +140,4 @@ stages:
           COVERITY_PASSPHRASE: $(COV_PASSPHRASE)
           NETWORK_SSL_TRUSTALL: true            # only affects HTTPS; harmless on HTTP
           BRIDGE_COVERITY_LOCAL: true           # 
+          COVERITY_INSTALL_DIRECTORY: /home/ubuntu/cov-platform
