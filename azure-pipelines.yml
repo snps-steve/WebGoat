@@ -1,5 +1,5 @@
 # Complete ADO pipeline: Build WebGoat, then run Black Duck SCA and Coverity via Bridge
-# Self-hosted agent expected (Ubuntu). Requires Java, Maven, Docker.
+# Self-hosted agent expected (Ubuntu). Requires Java, Maven (or mvnw), Docker.
 # Secrets expected as pipeline vars or variable group:
 #   BD_URL, BD_TOKEN
 #   COV_URL (e.g., https://coverity.mycorp.local:8443), COV_USER, COV_PASSPHRASE
@@ -24,7 +24,7 @@ variables:
   value: '$(Build.Repository.Name)'
 - name: COVERITY_STREAM_NAME
   value: '$(Build.SourceBranchName)'
-# Set to 'true' if you prefer skipping UI tests instead of installing system deps.
+# Set to 'true' to skip UI tests instead of installing browser deps.
 - name: SKIP_UI_TESTS
   value: 'false'
 
@@ -47,18 +47,53 @@ stages:
         java -version || true
       displayName: "Env + Docker + JDK sanity"
 
-    # Install Playwright browser deps on Ubuntu (only if NOT skipping UI tests)
+    # Install Playwright deps by invoking the CLI in the module that declares it.
+    # Falls back to apt-get installing common libs if the module is not found.
     - bash: |
         set -euo pipefail
-        if command -v apt-get >/dev/null 2>&1; then
-          echo "Installing Playwright host dependencies via CLI..."
-          # Prefer passwordless sudo on the agent; if not present this will fail fast.
-          sudo -n mvn -q exec:java \
-            -Dexec.mainClass=com.microsoft.playwright.CLI \
-            -Dexec.args="install-deps"
-          echo "Playwright host dependencies installed."
-        else
+        if [ "$(echo "${SKIP_UI_TESTS}")" = "true" ]; then
+          echo "SKIP_UI_TESTS=true; skipping Playwright dependency install."
+          exit 0
+        fi
+
+        if ! command -v apt-get >/dev/null 2>&1; then
           echo "apt-get not found; skipping Playwright deps install."
+          exit 0
+        fi
+
+        # Find a pom.xml that declares com.microsoft.playwright (module with UI tests)
+        POM_PATH="$(grep -RIl --include='pom.xml' '<groupId>com.microsoft.playwright</groupId>' . | head -n1 || true)"
+        if [ -n "${POM_PATH}" ]; then
+          MOD_DIR="$(dirname "${POM_PATH}")"
+          echo "Found Playwright module at: ${MOD_DIR}"
+
+          # Choose mvn or mvnw
+          if command -v mvn >/dev/null 2>&1; then
+            MVN_CMD="mvn"
+          else
+            chmod +x ./mvnw
+            MVN_CMD="./mvnw"
+          fi
+
+          # Install host deps and Chromium browser via the Playwright Java CLI
+          echo "Installing Playwright host dependencies via CLI..."
+          (cd "${MOD_DIR}" && sudo -n ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install-deps") \
+          || (cd "${MOD_DIR}" && ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install-deps")
+
+          echo "Installing Playwright Chromium browser..."
+          (cd "${MOD_DIR}" && sudo -n ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium") \
+          || (cd "${MOD_DIR}" && ${MVN_CMD} -q exec:java -Dexec.mainClass=com.microsoft.playwright.CLI -Dexec.args="install chromium")
+
+          echo "Playwright dependencies and browser installed."
+        else
+          echo "No module with com.microsoft.playwright found; installing common OS libs..."
+          sudo -n apt-get update
+          # Try generic package names first, then t64 variants as needed
+          sudo -n apt-get install -y --no-install-recommends libgtk-3-0 || sudo -n apt-get install -y libgtk-3-0t64
+          sudo -n apt-get install -y --no-install-recommends \
+            libnss3 libx11-xcb1 libxcomposite1 libxdamage1 libxfixes3 libdrm2 libgbm1 libasound2 libcups2 \
+            libatk-bridge2.0-0 libatspi2.0-0 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 libxrandr2 libxshmfence1 || true
+          echo "OS libs installed."
         fi
       displayName: "Install Playwright browser deps (Linux)"
       condition: and(succeeded(), ne(variables['SKIP_UI_TESTS'], 'true'))
@@ -118,7 +153,6 @@ stages:
           blackducksca_scan_failure_severities: 'BLOCKER'
           blackducksca_reports_sarif_create: true
           mark_build_status: 'SucceededWithIssues'
-          # network_ssl_trust_all: true  # temporary only; prefer installing CA
 
       # PR build: enable PR comments + Fix PR (requires azure_token)
       - task: BlackDuckSecurityScan@2
@@ -137,7 +171,6 @@ stages:
           blackducksca_fixpr_enabled: true
           azure_token: $(System.AccessToken)
           mark_build_status: 'SucceededWithIssues'
-          # network_ssl_trust_all: true
 
   # ---- Coverity (Bridge local analysis; no toolslist) ----
   - job: Coverity
@@ -162,6 +195,20 @@ stages:
           echo "##vso[task.setvariable variable=COVERITY_STREAM_NAME]$STRM_CLEAN"
         displayName: "Sanitize Coverity project/stream names"
 
+      # Ensure /home/ubuntu/cov-platform exists and is writable by the agent user
+      - bash: |
+          set -euo pipefail
+          INST_DIR="/home/ubuntu/cov-platform"
+          echo "Preparing Coverity install directory at: ${INST_DIR}"
+          if command -v sudo >/dev/null 2>&1; then
+            sudo -n mkdir -p "${INST_DIR}" || mkdir -p "${INST_DIR}"
+            sudo -n chown -R "$(id -u):$(id -g)" "${INST_DIR}" || true
+          else
+            mkdir -p "${INST_DIR}"
+          fi
+          ls -ld "${INST_DIR}"
+        displayName: "Prepare Coverity install dir"
+
       # Branch/CI build (not a PR): Coverity scan without PR comments
       - task: BlackDuckSecurityScan@2
         displayName: "Coverity Scan (non-PR, local analysis)"
@@ -174,9 +221,8 @@ stages:
           coverity_user: $(COV_USER)
           coverity_passphrase: $(COV_PASSPHRASE)
           coverity_local: true
-          coverity_install_directory: $(Agent.TempDirectory)/cov-platform
+          coverity_install_directory: /home/ubuntu/cov-platform
           mark_build_status: 'SucceededWithIssues'
-          # network_ssl_trust_all: true  # temporary only; prefer installing CA
 
       # PR build: enable PR comments (requires azure_token)
       - task: BlackDuckSecurityScan@2
@@ -190,8 +236,7 @@ stages:
           coverity_user: $(COV_USER)
           coverity_passphrase: $(COV_PASSPHRASE)
           coverity_local: true
-          coverity_install_directory: $(Agent.TempDirectory)/cov-platform
+          coverity_install_directory: /home/ubuntu/cov-platform
           coverity_prcomment_enabled: true
           azure_token: $(System.AccessToken)
           mark_build_status: 'SucceededWithIssues'
-          # network_ssl_trust_all: true
